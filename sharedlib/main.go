@@ -160,6 +160,15 @@ func writeSignInfoResult(txInfo string, err error, txInfoBuffer []byte, errorBuf
 	return signInfoResult{Status: signInfoStatusOK, TxInfoLength: txInfoLength}
 }
 
+func writeSignInfoPanicResult(panicValue any, errorBuffer []byte) signInfoResult {
+	panicText := fmt.Sprintf("panic: %v", panicValue)
+	status, errorLength := writeStringToBytesBufferWithStatus(errorBuffer, panicText, signInfoStatusErrorBufferTooSmall)
+	if status != signInfoStatusOK {
+		return signInfoResult{Status: status, ErrorLength: errorLength}
+	}
+	return signInfoResult{Status: signInfoStatusPanic, ErrorLength: errorLength}
+}
+
 func cCharBuffer(buffer *C.char, capacity C.int) []byte {
 	if buffer == nil || capacity <= 0 {
 		return nil
@@ -181,14 +190,10 @@ func writeSignInfoResultToCBuffers(txInfo string, err error, txInfoBuffer *C.cha
 }
 
 func writeSignInfoPanicToCBuffers(panicValue any, txInfoLength *C.int, errorBuffer *C.char, errorCapacity C.int, errorLength *C.int) C.int {
-	panicText := fmt.Sprintf("panic: %v", panicValue)
-	status, length := writeStringToBytesBufferWithStatus(cCharBuffer(errorBuffer, errorCapacity), panicText, signInfoStatusErrorBufferTooSmall)
+	result := writeSignInfoPanicResult(panicValue, cCharBuffer(errorBuffer, errorCapacity))
 	setCIntIfNotNil(txInfoLength, 0)
-	setCIntIfNotNil(errorLength, length)
-	if status != signInfoStatusOK {
-		return C.int(status)
-	}
-	return C.int(signInfoStatusPanic)
+	setCIntIfNotNil(errorLength, result.ErrorLength)
+	return C.int(result.Status)
 }
 
 // getClient returns the go TxClient from the specified cApiKeyIndex and cAccountIndex

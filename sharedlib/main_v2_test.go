@@ -115,3 +115,47 @@ func TestWriteSignInfoResultReportsSmallErrorBuffer(t *testing.T) {
 		t.Fatalf("error buffer = %q, want unchanged %q", string(errorBuffer), string(originalErrorBuffer))
 	}
 }
+
+func TestWriteSignInfoPanicResultWritesPanicText(t *testing.T) {
+	errorBuffer := make([]byte, 1024)
+	panicText := "panic: signer stack exhausted"
+
+	result := writeSignInfoPanicResult("signer stack exhausted", errorBuffer)
+
+	if result.Status != signInfoStatusPanic {
+		t.Fatalf("status = %v, want %v", result.Status, signInfoStatusPanic)
+	}
+	if result.TxInfoLength != 0 {
+		t.Fatalf("tx info length = %d, want 0", result.TxInfoLength)
+	}
+	if result.ErrorLength != len(panicText) {
+		t.Fatalf("error length = %d, want %d", result.ErrorLength, len(panicText))
+	}
+	if got := string(errorBuffer[:result.ErrorLength]); got != panicText {
+		t.Fatalf("error buffer = %q, want %q", got, panicText)
+	}
+}
+
+func TestWriteSignInfoPanicResultReportsSmallErrorBuffer(t *testing.T) {
+	errorBuffer := make([]byte, 4)
+	for i := range errorBuffer {
+		errorBuffer[i] = 'x'
+	}
+	originalErrorBuffer := append([]byte(nil), errorBuffer...)
+	panicText := "panic: signer stack exhausted"
+
+	result := writeSignInfoPanicResult("signer stack exhausted", errorBuffer)
+
+	if result.Status != signInfoStatusErrorBufferTooSmall {
+		t.Fatalf("status = %v, want %v", result.Status, signInfoStatusErrorBufferTooSmall)
+	}
+	if result.TxInfoLength != 0 {
+		t.Fatalf("tx info length = %d, want 0", result.TxInfoLength)
+	}
+	if result.ErrorLength != len(panicText) {
+		t.Fatalf("error length = %d, want %d", result.ErrorLength, len(panicText))
+	}
+	if string(errorBuffer) != string(originalErrorBuffer) {
+		t.Fatalf("error buffer = %q, want unchanged %q", string(errorBuffer), string(originalErrorBuffer))
+	}
+}
