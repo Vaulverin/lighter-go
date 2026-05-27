@@ -4,7 +4,7 @@ This repository serves as the reference implementation of signing & hashing of L
 The sharedlib is compiled for a variety of platforms.
 - macOS (darwin) dynamic library (.dylib) for arm architecture (M processor, not Intel)
 - linux shared object (.so) for both amd64 and arm architectures
-- windows .ddl (dynamic-link library) for amd64 architecture
+- windows .dll (dynamic-link library) for amd64 architecture
 
 The go SDK implements just the core signing, as well as a small HTTP client so that users can:
 - not specify the nonce of the transaction (this will result in an HTTP call, so beware)
@@ -15,6 +15,34 @@ The [Python SDK](https://github.com/elliottech/lighter-python) offers support fo
 All generated shared libraries follow the naming convention `lighter_signer_{os}_{arch}` where os is linux/windows/darwin and arch is amd64(x86) or arm64.\
 The build & accompanying `.h` files can be found in the release notes [here](https://github.com/elliottech/lighter-go/releases).\
 If you'd like to compile your own binaries, the commands are in the `justfile`.
+
+## .NET hot-path signer fork
+
+This fork keeps the upstream signer API intact and adds a small V2 ABI for latency-sensitive .NET order flows. The
+change was made for an in-process trading service that signs many Lighter create/cancel/modify/cancel-all order
+transactions from CoreCLR through P/Invoke.
+
+The V2 ABI is intentionally limited to hot order signing:
+
+- `SignCreateOrderInfoV2`
+- `SignCancelOrderInfoV2`
+- `SignModifyOrderInfoV2`
+- `SignCancelAllOrdersInfoV2`
+
+These public C wrapper exports call internal Go workers after installing a larger Linux alternate signal stack on the
+calling thread. This reduces the risk of CoreCLR/Go signal-stack interaction failures when the Go runtime is embedded
+inside a .NET process.
+
+The V2 functions return only the `tx_info` JSON needed by the exchange API, plus an error string when signing fails.
+They write into caller-owned buffers instead of returning C heap strings. This avoids per-order `C.CString` allocations
+for unused fields such as `tx_hash` and `message_to_sign`, removes `Free` ownership from the hot path, and lets the
+caller resize exactly once when a buffer is too small.
+
+Create and modify V2 order signing use the non-integrator transaction option path because the .NET adapter currently
+passes zero integrator values. If integrator signing is needed later, add a separate V2 integrator entry point rather
+than adding default hot-path work back to these functions.
+
+The existing ABI remains available for non-hot operations and for compatibility with upstream callers.
 
 
 ## Transactions
