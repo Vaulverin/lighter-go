@@ -52,6 +52,20 @@ import "C"
 
 var chainId uint32
 
+const (
+	signInfoStatusOK                   = 0
+	signInfoStatusTxInfoBufferTooSmall = 1
+	signInfoStatusErrorBufferTooSmall  = 2
+	signInfoStatusSigningFailed        = 3
+	signInfoStatusPanic                = 4
+)
+
+type signInfoResult struct {
+	Status       int
+	TxInfoLength int
+	ErrorLength  int
+}
+
 func wrapErr(err any) *C.char {
 	if err == nil {
 		return nil
@@ -104,6 +118,77 @@ func convertTxInfoToResponse(txInfo txtypes.TxInfo, err error) C.SignedTxRespons
 	}
 
 	return resp
+}
+
+func txInfoString(txInfo txtypes.TxInfo, err error) (string, error) {
+	if err != nil {
+		return "", err
+	}
+	if txInfo == nil {
+		return "", fmt.Errorf("nil transaction info")
+	}
+	return txInfo.GetTxInfo()
+}
+
+func writeStringToBytesBuffer(dst []byte, value string) (status int, length int) {
+	return writeStringToBytesBufferWithStatus(dst, value, signInfoStatusTxInfoBufferTooSmall)
+}
+
+func writeStringToBytesBufferWithStatus(dst []byte, value string, smallStatus int) (status int, length int) {
+	length = len(value)
+	if len(dst) < length {
+		return smallStatus, length
+	}
+	copy(dst, value)
+	return signInfoStatusOK, length
+}
+
+func writeSignInfoResult(txInfo string, err error, txInfoBuffer []byte, errorBuffer []byte) signInfoResult {
+	if err != nil {
+		errText := err.Error()
+		status, errorLength := writeStringToBytesBufferWithStatus(errorBuffer, errText, signInfoStatusErrorBufferTooSmall)
+		if status != signInfoStatusOK {
+			return signInfoResult{Status: status, ErrorLength: errorLength}
+		}
+		return signInfoResult{Status: signInfoStatusSigningFailed, ErrorLength: errorLength}
+	}
+
+	status, txInfoLength := writeStringToBytesBuffer(txInfoBuffer, txInfo)
+	if status != signInfoStatusOK {
+		return signInfoResult{Status: status, TxInfoLength: txInfoLength}
+	}
+	return signInfoResult{Status: signInfoStatusOK, TxInfoLength: txInfoLength}
+}
+
+func cCharBuffer(buffer *C.char, capacity C.int) []byte {
+	if buffer == nil || capacity <= 0 {
+		return nil
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(buffer)), int(capacity))
+}
+
+func setCIntIfNotNil(dst *C.int, value int) {
+	if dst != nil {
+		*dst = C.int(value)
+	}
+}
+
+func writeSignInfoResultToCBuffers(txInfo string, err error, txInfoBuffer *C.char, txInfoCapacity C.int, txInfoLength *C.int, errorBuffer *C.char, errorCapacity C.int, errorLength *C.int) C.int {
+	result := writeSignInfoResult(txInfo, err, cCharBuffer(txInfoBuffer, txInfoCapacity), cCharBuffer(errorBuffer, errorCapacity))
+	setCIntIfNotNil(txInfoLength, result.TxInfoLength)
+	setCIntIfNotNil(errorLength, result.ErrorLength)
+	return C.int(result.Status)
+}
+
+func writeSignInfoPanicToCBuffers(panicValue any, txInfoLength *C.int, errorBuffer *C.char, errorCapacity C.int, errorLength *C.int) C.int {
+	panicText := fmt.Sprintf("panic: %v", panicValue)
+	status, length := writeStringToBytesBufferWithStatus(cCharBuffer(errorBuffer, errorCapacity), panicText, signInfoStatusErrorBufferTooSmall)
+	setCIntIfNotNil(txInfoLength, 0)
+	setCIntIfNotNil(errorLength, length)
+	if status != signInfoStatusOK {
+		return C.int(status)
+	}
+	return C.int(signInfoStatusPanic)
 }
 
 // getClient returns the go TxClient from the specified cApiKeyIndex and cAccountIndex
@@ -288,6 +373,43 @@ func SignCreateOrder(cMarketIndex C.int, cClientOrderIndex C.longlong, cBaseAmou
 	return convertTxInfoToResponse(txInfo, err)
 }
 
+//export SignCreateOrderInfoV2Go
+func SignCreateOrderInfoV2Go(cMarketIndex C.int, cClientOrderIndex C.longlong, cBaseAmount C.longlong, cPrice C.int, cIsAsk C.int, cOrderType C.int, cTimeInForce C.int, cReduceOnly C.int, cTriggerPrice C.int, cOrderExpiry C.longlong, cSkipNonce C.uint8_t, cNonce C.longlong, cApiKeyIndex C.int, cAccountIndex C.longlong, txInfoBuffer *C.char, txInfoCapacity C.int, txInfoLength *C.int, errorBuffer *C.char, errorCapacity C.int, errorLength *C.int) (ret C.int) {
+	defer func() {
+		if r := recover(); r != nil {
+			ret = writeSignInfoPanicToCBuffers(r, txInfoLength, errorBuffer, errorCapacity, errorLength)
+		}
+	}()
+
+	c, err := getClient(cApiKeyIndex, cAccountIndex)
+	if err != nil {
+		return writeSignInfoResultToCBuffers("", err, txInfoBuffer, txInfoCapacity, txInfoLength, errorBuffer, errorCapacity, errorLength)
+	}
+
+	orderExpiry := int64(cOrderExpiry)
+	if orderExpiry == -1 {
+		orderExpiry = time.Now().Add(time.Hour * 24 * 28).UnixMilli()
+	}
+
+	tx := &types.CreateOrderTxReq{
+		MarketIndex:      int16(cMarketIndex),
+		ClientOrderIndex: int64(cClientOrderIndex),
+		BaseAmount:       int64(cBaseAmount),
+		Price:            uint32(cPrice),
+		IsAsk:            uint8(cIsAsk),
+		Type:             uint8(cOrderType),
+		TimeInForce:      uint8(cTimeInForce),
+		ReduceOnly:       uint8(cReduceOnly),
+		TriggerPrice:     uint32(cTriggerPrice),
+		OrderExpiry:      orderExpiry,
+	}
+	ops := getTransactOpts(cSkipNonce, cNonce)
+
+	txInfo, err := c.GetCreateOrderTransaction(tx, ops)
+	txInfoStr, err := txInfoString(txInfo, err)
+	return writeSignInfoResultToCBuffers(txInfoStr, err, txInfoBuffer, txInfoCapacity, txInfoLength, errorBuffer, errorCapacity, errorLength)
+}
+
 //export SignCreateGroupedOrders
 func SignCreateGroupedOrders(cGroupingType C.uint8_t, cOrders *C.CreateOrderTxReq, cLen C.int, cIntegratorAccountIndex C.longlong, cIntegratorTakerFee C.int, cIntegratorMakerFee C.int, cSkipNonce C.uint8_t, cNonce C.longlong, cApiKeyIndex C.int, cAccountIndex C.longlong) (ret C.SignedTxResponse) {
 	defer func() {
@@ -362,6 +484,30 @@ func SignCancelOrder(cMarketIndex C.int, cOrderIndex C.longlong, cSkipNonce C.ui
 	return convertTxInfoToResponse(txInfo, err)
 }
 
+//export SignCancelOrderInfoV2Go
+func SignCancelOrderInfoV2Go(cMarketIndex C.int, cOrderIndex C.longlong, cSkipNonce C.uint8_t, cNonce C.longlong, cApiKeyIndex C.int, cAccountIndex C.longlong, txInfoBuffer *C.char, txInfoCapacity C.int, txInfoLength *C.int, errorBuffer *C.char, errorCapacity C.int, errorLength *C.int) (ret C.int) {
+	defer func() {
+		if r := recover(); r != nil {
+			ret = writeSignInfoPanicToCBuffers(r, txInfoLength, errorBuffer, errorCapacity, errorLength)
+		}
+	}()
+
+	c, err := getClient(cApiKeyIndex, cAccountIndex)
+	if err != nil {
+		return writeSignInfoResultToCBuffers("", err, txInfoBuffer, txInfoCapacity, txInfoLength, errorBuffer, errorCapacity, errorLength)
+	}
+
+	tx := &types.CancelOrderTxReq{
+		MarketIndex: int16(cMarketIndex),
+		Index:       int64(cOrderIndex),
+	}
+	ops := getTransactOpts(cSkipNonce, cNonce)
+
+	txInfo, err := c.GetCancelOrderTransaction(tx, ops)
+	txInfoStr, err := txInfoString(txInfo, err)
+	return writeSignInfoResultToCBuffers(txInfoStr, err, txInfoBuffer, txInfoCapacity, txInfoLength, errorBuffer, errorCapacity, errorLength)
+}
+
 //export SignWithdraw
 func SignWithdraw(cAssetIndex C.int, cRouteType C.int, cAmount C.ulonglong, cSkipNonce C.uint8_t, cNonce C.longlong, cApiKeyIndex C.int, cAccountIndex C.longlong) (ret C.SignedTxResponse) {
 	defer func() {
@@ -434,6 +580,30 @@ func SignCancelAllOrders(cTimeInForce C.int, cTime C.longlong, cSkipNonce C.uint
 	return convertTxInfoToResponse(txInfo, err)
 }
 
+//export SignCancelAllOrdersInfoV2Go
+func SignCancelAllOrdersInfoV2Go(cTimeInForce C.int, cTime C.longlong, cSkipNonce C.uint8_t, cNonce C.longlong, cApiKeyIndex C.int, cAccountIndex C.longlong, txInfoBuffer *C.char, txInfoCapacity C.int, txInfoLength *C.int, errorBuffer *C.char, errorCapacity C.int, errorLength *C.int) (ret C.int) {
+	defer func() {
+		if r := recover(); r != nil {
+			ret = writeSignInfoPanicToCBuffers(r, txInfoLength, errorBuffer, errorCapacity, errorLength)
+		}
+	}()
+
+	c, err := getClient(cApiKeyIndex, cAccountIndex)
+	if err != nil {
+		return writeSignInfoResultToCBuffers("", err, txInfoBuffer, txInfoCapacity, txInfoLength, errorBuffer, errorCapacity, errorLength)
+	}
+
+	tx := &types.CancelAllOrdersTxReq{
+		TimeInForce: uint8(cTimeInForce),
+		Time:        int64(cTime),
+	}
+	ops := getTransactOpts(cSkipNonce, cNonce)
+
+	txInfo, err := c.GetCancelAllOrdersTransaction(tx, ops)
+	txInfoStr, err := txInfoString(txInfo, err)
+	return writeSignInfoResultToCBuffers(txInfoStr, err, txInfoBuffer, txInfoCapacity, txInfoLength, errorBuffer, errorCapacity, errorLength)
+}
+
 //export SignModifyOrder
 func SignModifyOrder(cMarketIndex C.int, cIndex C.longlong, cBaseAmount C.longlong, cPrice C.longlong, cTriggerPrice C.longlong, cIntegratorAccountIndex C.longlong, cIntegratorTakerFee C.int, cIntegratorMakerFee C.int, cSkipNonce C.uint8_t, cNonce C.longlong, cApiKeyIndex C.int, cAccountIndex C.longlong) (ret C.SignedTxResponse) {
 	defer func() {
@@ -464,6 +634,33 @@ func SignModifyOrder(cMarketIndex C.int, cIndex C.longlong, cBaseAmount C.longlo
 
 	txInfo, err := c.GetModifyOrderTransaction(tx, ops)
 	return convertTxInfoToResponse(txInfo, err)
+}
+
+//export SignModifyOrderInfoV2Go
+func SignModifyOrderInfoV2Go(cMarketIndex C.int, cIndex C.longlong, cBaseAmount C.longlong, cPrice C.longlong, cTriggerPrice C.longlong, cSkipNonce C.uint8_t, cNonce C.longlong, cApiKeyIndex C.int, cAccountIndex C.longlong, txInfoBuffer *C.char, txInfoCapacity C.int, txInfoLength *C.int, errorBuffer *C.char, errorCapacity C.int, errorLength *C.int) (ret C.int) {
+	defer func() {
+		if r := recover(); r != nil {
+			ret = writeSignInfoPanicToCBuffers(r, txInfoLength, errorBuffer, errorCapacity, errorLength)
+		}
+	}()
+
+	c, err := getClient(cApiKeyIndex, cAccountIndex)
+	if err != nil {
+		return writeSignInfoResultToCBuffers("", err, txInfoBuffer, txInfoCapacity, txInfoLength, errorBuffer, errorCapacity, errorLength)
+	}
+
+	tx := &types.ModifyOrderTxReq{
+		MarketIndex:  int16(cMarketIndex),
+		Index:        int64(cIndex),
+		BaseAmount:   int64(cBaseAmount),
+		Price:        uint32(cPrice),
+		TriggerPrice: uint32(cTriggerPrice),
+	}
+	ops := getTransactOpts(cSkipNonce, cNonce)
+
+	txInfo, err := c.GetModifyOrderTransaction(tx, ops)
+	txInfoStr, err := txInfoString(txInfo, err)
+	return writeSignInfoResultToCBuffers(txInfoStr, err, txInfoBuffer, txInfoCapacity, txInfoLength, errorBuffer, errorCapacity, errorLength)
 }
 
 //export SignTransfer
